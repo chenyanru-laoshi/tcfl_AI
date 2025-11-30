@@ -1,0 +1,383 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { RefreshCw, Trophy, Volume2, Play, CheckCircle2, AlertCircle, Sparkles } from 'lucide-react';
+
+// --- 資料設定 (Vocabulary Data) ---
+const VOCABULARY = [
+  { id: 1, emoji: '🐟', zh: '魚', pinyin: 'Yú', bg: 'bg-blue-200' },
+  { id: 2, emoji: '🥩', zh: '牛肉', pinyin: 'Niú Ròu', bg: 'bg-red-200' },
+  { id: 3, emoji: '🍫', zh: '巧克力', pinyin: 'Qiǎo Kè Lì', bg: 'bg-amber-200' },
+  { id: 4, emoji: '🍦', zh: '冰淇淋', pinyin: 'Bīng Qí Lín', bg: 'bg-pink-200' },
+  { id: 5, emoji: '🍚', zh: '米', pinyin: 'Mǐ', bg: 'bg-slate-200' },
+  { id: 6, emoji: '🥬', zh: '青菜', pinyin: 'Qīng Cài', bg: 'bg-green-200' },
+  { id: 7, emoji: '🍬', zh: '糖果', pinyin: 'Táng Guǒ', bg: 'bg-purple-200' },
+];
+
+// --- 音效管理器 (Audio Context) ---
+const playSound = (type) => {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    if (type === 'correct') {
+      // 叮咚 (兩段高音)
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(660, ctx.currentTime);
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.5);
+    } else if (type === 'wrong') {
+      // 嗡嗡 (低頻鋸齒波)
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(150, ctx.currentTime);
+      osc.frequency.linearRampToValueAtTime(100, ctx.currentTime + 0.3);
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.3);
+    } else if (type === 'win') {
+      // 勝利音效 (琶音)
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(440, ctx.currentTime);
+      osc.frequency.setValueAtTime(554, ctx.currentTime + 0.1);
+      osc.frequency.setValueAtTime(659, ctx.currentTime + 0.2);
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.3);
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.8);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.8);
+    }
+  } catch (e) {
+    console.error("Audio play failed", e);
+  }
+};
+
+// --- 語音朗讀函式 ---
+const speakText = (text) => {
+  if ('speechSynthesis' in window) {
+    window.speechSynthesis.cancel(); // 停止之前的發音
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'zh-TW';
+    utterance.rate = 0.8; // 稍微放慢語速適合兒童
+    window.speechSynthesis.speak(utterance);
+  }
+};
+
+// --- 主元件 ---
+export default function SupermarketDifferenceGame() {
+  const [gameState, setGameState] = useState('start'); // 'start', 'playing', 'won'
+  const [leftGrid, setLeftGrid] = useState([]);
+  const [rightGrid, setRightGrid] = useState([]);
+  const [diffIndices, setDiffIndices] = useState([]); // 正確答案的索引集合
+  const [foundIndices, setFoundIndices] = useState([]); // 已經找到的索引
+  const [activeCard, setActiveCard] = useState(null); // 當前彈出的生詞卡
+  const [feedbackMsg, setFeedbackMsg] = useState(''); // 錯誤提示訊息
+  const [shakeIndex, setShakeIndex] = useState(null); // 用於觸發錯誤動畫
+
+  // 遊戲初始化邏輯
+  const initGame = useCallback(() => {
+    // 1. 生成 4x4 (16格) 的基礎網格
+    const baseGrid = Array.from({ length: 16 }, () => {
+      const randomItem = VOCABULARY[Math.floor(Math.random() * VOCABULARY.length)];
+      return { ...randomItem, instanceId: Math.random() }; // instanceId 用於 React key
+    });
+
+    // 2. 複製一份給右邊
+    const modifiedGrid = [...baseGrid];
+
+    // 3. 隨機選擇 5 個位置進行替換
+    const indices = Array.from({ length: 16 }, (_, i) => i);
+    // Fisher-Yates shuffle 部分實作來取前 5 個
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+    const targetIndices = indices.slice(0, 5);
+
+    // 4. 替換這 5 個位置的商品，確保不一樣
+    targetIndices.forEach(index => {
+      const currentItem = modifiedGrid[index];
+      let newItem;
+      do {
+        newItem = VOCABULARY[Math.floor(Math.random() * VOCABULARY.length)];
+      } while (newItem.id === currentItem.id);
+      
+      modifiedGrid[index] = { ...newItem, instanceId: Math.random() };
+    });
+
+    setLeftGrid(baseGrid);
+    setRightGrid(modifiedGrid);
+    setDiffIndices(targetIndices);
+    setFoundIndices([]);
+    setGameState('playing');
+    setActiveCard(null);
+    setFeedbackMsg('');
+  }, []);
+
+  // 點擊格子處理
+  const handleGridClick = (index) => {
+    if (gameState !== 'playing' || activeCard) return;
+
+    // 情況 A: 點擊了正確的不同處
+    if (diffIndices.includes(index)) {
+      if (foundIndices.includes(index)) return; // 已經找過了
+
+      playSound('correct');
+      const item = rightGrid[index];
+      
+      // 更新狀態
+      const newFound = [...foundIndices, index];
+      setFoundIndices(newFound);
+      
+      // 彈出卡片並朗讀
+      setActiveCard(item);
+      speakText(item.zh);
+
+      // 檢查是否獲勝
+      if (newFound.length === 5) {
+        setTimeout(() => {
+          playSound('win');
+          setGameState('won');
+          setActiveCard(null);
+        }, 1500); // 稍微延遲讓玩家看完最後一張卡
+      }
+    } 
+    // 情況 B: 點擊了相同的地方（錯誤）
+    else {
+      playSound('wrong');
+      setShakeIndex(index);
+      setFeedbackMsg('這裡一樣喔！再仔細看看 👀');
+      setTimeout(() => setShakeIndex(null), 500);
+      setTimeout(() => setFeedbackMsg(''), 1500);
+    }
+  };
+
+  // 關閉生詞卡
+  const closeCard = () => {
+    setActiveCard(null);
+  };
+
+  // --- 渲染部分 ---
+
+  // 1. 開始畫面
+  if (gameState === 'start') {
+    return (
+      <div className="min-h-screen bg-yellow-50 flex flex-col items-center justify-center p-4">
+        <div className="bg-white p-8 rounded-3xl shadow-xl border-4 border-orange-300 max-w-md w-full text-center">
+          <div className="mb-6 flex justify-center">
+            <span className="text-6xl animate-bounce">🛒</span>
+          </div>
+          <h1 className="text-4xl font-black text-orange-500 mb-2 tracking-wide">超市大冒險</h1>
+          <p className="text-gray-500 mb-8 text-lg">找出 5 個不一樣的商品！</p>
+          
+          <button 
+            onClick={initGame}
+            className="w-full bg-orange-400 hover:bg-orange-500 text-white text-2xl font-bold py-4 px-8 rounded-2xl shadow-lg transform transition active:scale-95 flex items-center justify-center gap-3"
+          >
+            <Play size={32} fill="white" />
+            開始遊戲
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. 獲勝畫面
+  if (gameState === 'won') {
+    return (
+      <div className="min-h-screen bg-yellow-50 flex flex-col items-center justify-center p-4 relative overflow-hidden">
+        {/* 彩帶背景效果 (簡易模擬) */}
+        <div className="absolute inset-0 opacity-10 pointer-events-none">
+          {[...Array(20)].map((_, i) => (
+            <div key={i} className="absolute text-4xl animate-pulse" style={{
+              left: `${Math.random() * 100}%`,
+              top: `${Math.random() * 100}%`,
+              animationDelay: `${Math.random()}s`
+            }}>✨</div>
+          ))}
+        </div>
+
+        <div className="bg-white p-8 rounded-3xl shadow-2xl border-4 border-yellow-400 max-w-md w-full text-center z-10 transform transition-all animate-in zoom-in duration-500">
+          <Trophy size={80} className="mx-auto text-yellow-400 mb-6 drop-shadow-md animate-bounce" />
+          <h2 className="text-4xl font-black text-slate-700 mb-4">太棒了！</h2>
+          <p className="text-xl text-gray-500 mb-8">你找到了所有不同的商品！</p>
+          
+          <div className="grid grid-cols-4 gap-2 mb-8 bg-slate-50 p-4 rounded-xl">
+             {/* 顯示所有學到的單字作為回顧 */}
+             {VOCABULARY.map(v => (
+               <div key={v.id} className="text-center">
+                 <div className="text-2xl">{v.emoji}</div>
+               </div>
+             ))}
+          </div>
+
+          <button 
+            onClick={initGame}
+            className="w-full bg-green-500 hover:bg-green-600 text-white text-xl font-bold py-4 px-8 rounded-2xl shadow-lg transform transition active:scale-95 flex items-center justify-center gap-2"
+          >
+            <RefreshCw size={24} />
+            再玩一次
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. 遊戲進行畫面
+  return (
+    <div className="min-h-screen bg-yellow-50 flex flex-col items-center py-4 px-2 select-none">
+      
+      {/* 頂部資訊列 */}
+      <header className="w-full max-w-5xl flex justify-between items-center mb-4 bg-white p-4 rounded-2xl shadow-sm border-b-4 border-yellow-200">
+        <div className="flex items-center gap-2">
+           <div className="bg-orange-100 p-2 rounded-lg">
+             <Sparkles className="text-orange-500" />
+           </div>
+           <div>
+             <div className="text-xs text-gray-400 font-bold uppercase tracking-wider">進度</div>
+             <div className="text-2xl font-black text-orange-500 font-mono">
+               {foundIndices.length} / 5
+             </div>
+           </div>
+        </div>
+        
+        <h1 className="hidden md:block text-2xl font-bold text-slate-700 tracking-wider">
+          超市找碴 (Spot the Difference)
+        </h1>
+
+        <button 
+          onClick={initGame}
+          className="bg-slate-100 hover:bg-slate-200 p-3 rounded-xl transition text-slate-600"
+          title="重新開始"
+        >
+          <RefreshCw size={24} />
+        </button>
+      </header>
+
+      {/* 主要遊戲區域：RWD (手機直排, 桌機橫排) */}
+      <div className="flex flex-col lg:flex-row gap-6 lg:gap-12 w-full max-w-5xl justify-center items-start">
+        
+        {/* 左側：標準圖 */}
+        <div className="flex flex-col items-center">
+          <div className="mb-2 bg-blue-100 text-blue-800 px-4 py-1 rounded-full text-sm font-bold flex items-center gap-1">
+             <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+             參考圖 (Look Here)
+          </div>
+          <div className="grid grid-cols-4 gap-2 p-3 bg-white rounded-2xl shadow-lg border-2 border-blue-100">
+            {leftGrid.map((item, idx) => (
+              <div 
+                key={`${item.id}-${idx}`}
+                className={`w-14 h-14 sm:w-20 sm:h-20 flex items-center justify-center text-3xl sm:text-4xl rounded-xl ${item.bg} opacity-90 cursor-default`}
+              >
+                {item.emoji}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* 右側：找碴圖 (可互動) */}
+        <div className="flex flex-col items-center relative">
+          <div className="mb-2 bg-red-100 text-red-800 px-4 py-1 rounded-full text-sm font-bold flex items-center gap-1">
+             <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+             點這裡找不同! (Click Here)
+          </div>
+          
+          <div className="grid grid-cols-4 gap-2 p-3 bg-white rounded-2xl shadow-[0_0_20px_rgba(0,0,0,0.1)] border-2 border-red-100 relative">
+            {rightGrid.map((item, idx) => {
+              const isFound = foundIndices.includes(idx);
+              const isShaking = shakeIndex === idx;
+
+              return (
+                <button
+                  key={`${item.id}-${idx}-right`}
+                  onClick={() => handleGridClick(idx)}
+                  className={`
+                    w-14 h-14 sm:w-20 sm:h-20 flex items-center justify-center text-3xl sm:text-4xl rounded-xl 
+                    transition-all duration-200 transform
+                    ${item.bg}
+                    ${isShaking ? 'animate-shake ring-4 ring-red-400 z-10' : ''}
+                    ${!isFound ? 'hover:scale-105 hover:brightness-110 active:scale-95 cursor-pointer shadow-sm' : ''}
+                    ${isFound ? 'ring-4 ring-green-400 opacity-100 scale-100 z-10' : ''}
+                  `}
+                  disabled={isFound}
+                >
+                  {item.emoji}
+                  {isFound && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/10 rounded-xl animate-in zoom-in duration-300">
+                      <CheckCircle2 size={32} className="text-green-600 drop-shadow-lg" strokeWidth={3} />
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* 錯誤提示 Floating Text */}
+          {feedbackMsg && (
+            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none z-20">
+               <div className="bg-red-500 text-white px-6 py-3 rounded-full shadow-xl font-bold text-lg flex items-center gap-2 animate-bounce whitespace-nowrap">
+                 <AlertCircle size={20} />
+                 {feedbackMsg}
+               </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 生詞卡 Modal (找到時彈出) */}
+      {activeCard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-[2rem] p-6 w-full max-w-sm shadow-2xl transform transition-all scale-100 border-4 border-yellow-300 relative overflow-hidden">
+            {/* 背景裝飾 */}
+            <div className={`absolute top-0 left-0 w-full h-32 ${activeCard.bg} opacity-50 -z-10 rounded-t-[1.7rem]`}></div>
+            
+            <div className="flex flex-col items-center">
+              <div className="w-32 h-32 flex items-center justify-center bg-white rounded-full shadow-lg mb-4 text-7xl border-4 border-white">
+                {activeCard.emoji}
+              </div>
+              
+              <h2 className="text-5xl font-black text-slate-800 mb-1">{activeCard.zh}</h2>
+              <p className="text-xl text-slate-500 font-medium mb-6 font-mono">{activeCard.pinyin}</p>
+              
+              <div className="flex gap-3 w-full">
+                <button 
+                  onClick={() => speakText(activeCard.zh)}
+                  className="flex-1 bg-blue-100 hover:bg-blue-200 text-blue-600 font-bold py-3 px-4 rounded-xl transition flex items-center justify-center gap-2"
+                >
+                  <Volume2 size={24} />
+                  聽發音
+                </button>
+                <button 
+                  onClick={closeCard}
+                  className="flex-1 bg-yellow-400 hover:bg-yellow-500 text-white font-bold py-3 px-4 rounded-xl shadow-md transition transform active:scale-95"
+                >
+                  太好了！(OK)
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tailwind 自定義動畫 Style */}
+      <style>{`
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          25% { transform: translateX(-8px) rotate(-5deg); }
+          75% { transform: translateX(8px) rotate(5deg); }
+        }
+        .animate-shake {
+          animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both;
+        }
+      `}</style>
+    </div>
+  );
+}
